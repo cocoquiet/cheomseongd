@@ -1,3 +1,3 @@
-mod attachment;
-mod image;
-mod notice;
+pub mod attachment;
+pub mod image;
+pub mod notice;
