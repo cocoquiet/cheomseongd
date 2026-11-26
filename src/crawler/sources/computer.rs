@@ -1,10 +1,11 @@
 use std::time::Duration;
+use std::{collections::HashSet, convert::TryFrom};
 
 use chrono::NaiveDate;
 use reqwest::{Client, Url};
 use scraper::{Html, Selector};
 
-use crate::crawler::{CrawlError, CrawledNotice, Crawler};
+use crate::crawler::{CrawlError, CrawledAttachment, CrawledImage, CrawledNotice, Crawler};
 
 const SOURCE_ID: &str = "computer";
 const LIST_URL: &str = "https://computer.knu.ac.kr/bbs/board.php?bo_table=sub6_1_a";
@@ -12,9 +13,8 @@ const ORGANIZATION_NAME: &str = "경북대학교 컴퓨터학부";
 
 /// Crawler for the KNU School of Computer Science and Engineering notice board.
 ///
-/// The board is sorted newest-first, so each run reads its first page. The list
-/// page contains the metadata needed by `CrawledNotice`; body text is not
-/// available there and is left empty until detail-page parsing is added.
+/// The board is sorted newest-first, so each run reads its first page and then
+/// follows each notice link to parse its body, attachments, and images.
 pub struct ComputerCrawler {
     client: Client,
 }
@@ -59,8 +59,135 @@ impl Crawler for ComputerCrawler {
             .await
             .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
 
-        parse_notices(&html)
+        let mut notices = parse_notices(&html)?;
+
+        for notice in &mut notices {
+            let response = self
+                .client
+                .get(&notice.source_url)
+                .send()
+                .await
+                .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?
+                .error_for_status()
+                .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
+            let detail_html = response
+                .text()
+                .await
+                .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
+            let detail = parse_detail(&detail_html, &notice.source_url)?;
+
+            notice.body_text = detail.body_text;
+            notice.attachments = detail.attachments;
+            notice.images = detail.images;
+        }
+
+        Ok(notices)
     }
+}
+
+struct NoticeDetail {
+    body_text: Option<String>,
+    attachments: Vec<CrawledAttachment>,
+    images: Vec<CrawledImage>,
+}
+
+fn parse_detail(html: &str, detail_url: &str) -> Result<NoticeDetail, CrawlError> {
+    let document = Html::parse_document(html);
+    let body_selector = Selector::parse("#bo_v_con").expect("valid body selector");
+    let attachment_selector =
+        Selector::parse("#bo_v_file a.view_file_download").expect("valid attachment selector");
+    let file_name_selector = Selector::parse("strong").expect("valid file name selector");
+    let image_selector =
+        Selector::parse("#bo_v_img img, #bo_v_con img").expect("valid image selector");
+    let base_url =
+        Url::parse(detail_url).map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
+
+    let body = document
+        .select(&body_selector)
+        .next()
+        .ok_or_else(|| CrawlError::new(SOURCE_ID, "notice detail is missing #bo_v_con"))?;
+    let body_text = normalize_separated_text(body.text());
+    let body_text = (!body_text.is_empty()).then_some(body_text);
+
+    let mut attachments = Vec::new();
+    for (index, link) in document.select(&attachment_selector).enumerate() {
+        let href = link
+            .value()
+            .attr("href")
+            .ok_or_else(|| CrawlError::new(SOURCE_ID, "attachment link is missing its href"))?;
+        let download_url = base_url
+            .join(href)
+            .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
+        let file_name = link
+            .select(&file_name_selector)
+            .next()
+            .map(|element| normalize_text(element.text()))
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| normalize_text(link.text()));
+        if file_name.is_empty() {
+            return Err(CrawlError::new(SOURCE_ID, "attachment file name is empty"));
+        }
+
+        let source_key = download_url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "no").then(|| value.into_owned()))
+            .unwrap_or_else(|| file_name.clone());
+        let display_order = i32::try_from(index)
+            .map_err(|_| CrawlError::new(SOURCE_ID, "too many attachments on notice"))?;
+
+        attachments.push(CrawledAttachment {
+            source_key,
+            file_name,
+            download_url: download_url.into(),
+            display_order,
+            content_type: None,
+        });
+    }
+
+    let mut images = Vec::new();
+    let mut seen_image_urls = HashSet::new();
+    for image in document.select(&image_selector) {
+        let Some(src) = image
+            .value()
+            .attr("src")
+            .filter(|src| !src.trim().is_empty())
+            .or_else(|| {
+                image
+                    .value()
+                    .attr("data-src")
+                    .filter(|src| !src.trim().is_empty())
+            })
+        else {
+            continue;
+        };
+        let source_url = base_url
+            .join(src)
+            .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?
+            .to_string();
+        if !seen_image_urls.insert(source_url.clone()) {
+            continue;
+        }
+
+        let alt_text = image
+            .value()
+            .attr("alt")
+            .map(|alt| alt.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|alt| !alt.is_empty());
+        let display_order = i32::try_from(images.len())
+            .map_err(|_| CrawlError::new(SOURCE_ID, "too many images on notice"))?;
+
+        images.push(CrawledImage {
+            source_url,
+            alt_text,
+            display_order,
+        });
+    }
+
+    Ok(NoticeDetail {
+        body_text,
+        attachments,
+        images,
+    })
 }
 
 fn parse_notices(html: &str) -> Result<Vec<CrawledNotice>, CrawlError> {
@@ -127,6 +254,8 @@ fn parse_notices(html: &str) -> Result<Vec<CrawledNotice>, CrawlError> {
             body_text: None,
             is_pinned,
             published_on,
+            attachments: Vec::new(),
+            images: Vec::new(),
         });
     }
 
@@ -141,15 +270,20 @@ fn parse_notices(html: &str) -> Result<Vec<CrawledNotice>, CrawlError> {
 }
 
 fn normalize_text<'a>(text: impl Iterator<Item = &'a str>) -> String {
-    text.collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    normalize_whitespace(&text.collect::<String>())
+}
+
+fn normalize_separated_text<'a>(text: impl Iterator<Item = &'a str>) -> String {
+    normalize_whitespace(&text.collect::<Vec<_>>().join(" "))
+}
+
+fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ComputerCrawler, ORGANIZATION_NAME, SOURCE_ID, parse_notices};
+    use super::{ComputerCrawler, ORGANIZATION_NAME, SOURCE_ID, parse_detail, parse_notices};
     use crate::crawler::Crawler;
     use chrono::NaiveDate;
 
@@ -235,5 +369,62 @@ mod tests {
     fn crawler_exposes_expected_source_id() {
         let crawler = ComputerCrawler::with_client(reqwest::Client::new());
         assert_eq!(crawler.source_id(), "computer");
+    }
+
+    #[test]
+    fn parses_detail_body_attachments_and_images() {
+        let html = r#"
+            <article id="bo_v">
+              <section id="bo_v_atc">
+                <div id="bo_v_img"></div>
+                <div id="bo_v_con">
+                  <p>신청 안내입니다.</p>
+                  <p>자세한 내용은 아래 이미지를 확인하세요.</p>
+                  <img src="/data/notice/chart.png" alt="안내 그림">
+                  <img src="" data-src="https://images.example.org/extra.jpg" alt="추가 이미지">
+                </div>
+              </section>
+              <section id="bo_v_file">
+                <ul>
+                  <li>
+                    <a class="view_file_download"
+                       href="/bbs/download.php?bo_table=sub6_1_a&amp;wr_id=29538&amp;no=0&amp;nonce=abc">
+                      <strong>안내 자료.pdf</strong>
+                    </a>
+                  </li>
+                </ul>
+              </section>
+            </article>
+        "#;
+
+        let detail = parse_detail(
+            html,
+            "https://computer.knu.ac.kr/bbs/board.php?bo_table=sub6_1_a&wr_id=29538",
+        )
+        .expect("detail HTML should parse");
+
+        assert_eq!(
+            detail.body_text.as_deref(),
+            Some("신청 안내입니다. 자세한 내용은 아래 이미지를 확인하세요.")
+        );
+        assert_eq!(detail.attachments.len(), 1);
+        assert_eq!(detail.attachments[0].source_key, "0");
+        assert_eq!(detail.attachments[0].file_name, "안내 자료.pdf");
+        assert_eq!(
+            detail.attachments[0].download_url,
+            "https://computer.knu.ac.kr/bbs/download.php?bo_table=sub6_1_a&wr_id=29538&no=0&nonce=abc"
+        );
+        assert_eq!(detail.attachments[0].display_order, 0);
+        assert_eq!(detail.images.len(), 2);
+        assert_eq!(
+            detail.images[0].source_url,
+            "https://computer.knu.ac.kr/data/notice/chart.png"
+        );
+        assert_eq!(detail.images[0].alt_text.as_deref(), Some("안내 그림"));
+        assert_eq!(
+            detail.images[1].source_url,
+            "https://images.example.org/extra.jpg"
+        );
+        assert_eq!(detail.images[1].alt_text.as_deref(), Some("추가 이미지"));
     }
 }

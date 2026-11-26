@@ -6,7 +6,7 @@ mod runner;
 pub mod sources;
 
 pub use error::CrawlError;
-pub use model::CrawledNotice;
+pub use model::{CrawledAttachment, CrawledImage, CrawledNotice};
 pub use runner::{crawl, run};
 pub use sources::computer::ComputerCrawler;
 
