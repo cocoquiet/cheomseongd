@@ -1,5 +1,6 @@
 mod db;
 mod models;
+mod ops;
 mod schema;
 
 fn main() {
