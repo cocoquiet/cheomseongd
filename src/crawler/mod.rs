@@ -14,7 +14,5 @@ pub use runner::{crawl, run};
 pub trait Crawler: Send + Sync {
     fn source_id(&self) -> &'static str;
 
-    fn crawl(
-        &self,
-    ) -> impl Future<Output = Result<Vec<CrawledNotice>, CrawlError>> + Send + '_;
+    fn crawl(&self) -> impl Future<Output = Result<Vec<CrawledNotice>, CrawlError>> + Send + '_;
 }

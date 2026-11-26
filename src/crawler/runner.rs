@@ -1,4 +1,4 @@
-use super::{CrawlError, Crawler, CrawledNotice};
+use super::{CrawlError, CrawledNotice, Crawler};
 use crate::models::notice::{NewNotice, Notice};
 use crate::ops::notice::create_notice;
 
@@ -6,9 +6,7 @@ use crate::ops::notice::create_notice;
 ///
 /// Keeping persistence outside this function lets the runner report source
 /// failures without coupling crawler implementations to Diesel models.
-pub async fn crawl<C: Crawler + ?Sized>(
-    crawler: &C,
-) -> Result<Vec<CrawledNotice>, CrawlError> {
+pub async fn crawl<C: Crawler + ?Sized>(crawler: &C) -> Result<Vec<CrawledNotice>, CrawlError> {
     crawler.crawl().await
 }
 
