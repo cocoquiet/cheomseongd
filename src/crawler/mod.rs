@@ -3,10 +3,12 @@ use std::future::Future;
 mod error;
 mod model;
 mod runner;
+pub mod sources;
 
 pub use error::CrawlError;
 pub use model::CrawledNotice;
 pub use runner::{crawl, run};
+pub use sources::computer::ComputerCrawler;
 
 /// A crawler fetches and normalizes notices from one source.
 ///
