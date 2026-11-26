@@ -10,6 +10,9 @@ diesel = { version = "2.4.0", features = ["postgres", "chrono"] }
 dotenv = "0.15.0"
 chrono = {version = "0.4.45", features = ["serde"]}
 serde = { version = "1.0.229", features = ["derive"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "charset"] }
+scraper = "0.29.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 # The profile that 'dist' will build with
 [profile.dist]
