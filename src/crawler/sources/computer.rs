@@ -17,10 +17,11 @@ const ORGANIZATION_NAME: &str = "경북대학교 컴퓨터학부";
 /// follows each notice link to parse its body, attachments, and images.
 pub struct ComputerCrawler {
     client: Client,
+    max_notices: usize,
 }
 
 impl ComputerCrawler {
-    pub fn new() -> Result<Self, CrawlError> {
+    pub fn new(max_notices: usize) -> Result<Self, CrawlError> {
         let client = Client::builder()
             .user_agent(concat!(
                 env!("CARGO_PKG_NAME"),
@@ -31,11 +32,17 @@ impl ComputerCrawler {
             .build()
             .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
 
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            max_notices,
+        })
     }
 
-    pub fn with_client(client: Client) -> Self {
-        Self { client }
+    pub fn with_client(client: Client, max_notices: usize) -> Self {
+        Self {
+            client,
+            max_notices,
+        }
     }
 }
 
@@ -45,44 +52,73 @@ impl Crawler for ComputerCrawler {
     }
 
     async fn crawl(&self) -> Result<Vec<CrawledNotice>, CrawlError> {
-        let response = self
-            .client
-            .get(LIST_URL)
-            .send()
-            .await
-            .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?
-            .error_for_status()
-            .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
+        let mut notices = Vec::with_capacity(self.max_notices);
+        let mut seen_source_keys = HashSet::new();
+        let mut page = 1;
 
-        let html = response
-            .text()
-            .await
-            .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
-
-        let mut notices = parse_notices(&html)?;
-
-        for notice in &mut notices {
+        while notices.len() < self.max_notices {
             let response = self
                 .client
-                .get(&notice.source_url)
+                .get(list_page_url(page))
                 .send()
                 .await
                 .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?
                 .error_for_status()
                 .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
-            let detail_html = response
+            let html = response
                 .text()
                 .await
                 .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
-            let detail = parse_detail(&detail_html, &notice.source_url)?;
+            let page_notices = parse_notices(&html)?;
 
-            notice.body_text = detail.body_text;
-            notice.attachments = detail.attachments;
-            notice.images = detail.images;
+            if page_notices.is_empty() {
+                break;
+            }
+
+            let previous_count = notices.len();
+            for mut notice in page_notices {
+                if !seen_source_keys.insert(notice.source_key.clone()) {
+                    continue;
+                }
+                if notices.len() == self.max_notices {
+                    break;
+                }
+
+                let response = self
+                    .client
+                    .get(&notice.source_url)
+                    .send()
+                    .await
+                    .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?
+                    .error_for_status()
+                    .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
+                let detail_html = response
+                    .text()
+                    .await
+                    .map_err(|error| CrawlError::new(SOURCE_ID, error.to_string()))?;
+                let detail = parse_detail(&detail_html, &notice.source_url)?;
+
+                notice.body_text = detail.body_text;
+                notice.attachments = detail.attachments;
+                notice.images = detail.images;
+                notices.push(notice);
+            }
+
+            if notices.len() == previous_count {
+                break;
+            }
+
+            page += 1;
         }
 
         Ok(notices)
     }
+}
+
+fn list_page_url(page: usize) -> Url {
+    let mut url = Url::parse(LIST_URL).expect("valid list URL");
+    url.query_pairs_mut().append_pair("page", &page.to_string());
+    url
 }
 
 struct NoticeDetail {
@@ -192,6 +228,14 @@ fn parse_detail(html: &str, detail_url: &str) -> Result<NoticeDetail, CrawlError
 
 fn parse_notices(html: &str) -> Result<Vec<CrawledNotice>, CrawlError> {
     let document = Html::parse_document(html);
+    let board_selector = Selector::parse("#bo_list").expect("valid board selector");
+    if document.select(&board_selector).next().is_none() {
+        return Err(CrawlError::new(
+            SOURCE_ID,
+            "notice list is missing #bo_list",
+        ));
+    }
+
     let row_selector = Selector::parse("#bo_list tbody tr").expect("valid row selector");
     let title_selector = Selector::parse(".bo_tit a").expect("valid title selector");
     let category_selector = Selector::parse(".bo_cate_link").expect("valid category selector");
@@ -259,13 +303,6 @@ fn parse_notices(html: &str) -> Result<Vec<CrawledNotice>, CrawlError> {
         });
     }
 
-    if notices.is_empty() {
-        return Err(CrawlError::new(
-            SOURCE_ID,
-            "no notice rows found; the board markup may have changed",
-        ));
-    }
-
     Ok(notices)
 }
 
@@ -283,7 +320,9 @@ fn normalize_whitespace(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComputerCrawler, ORGANIZATION_NAME, SOURCE_ID, parse_detail, parse_notices};
+    use super::{
+        ComputerCrawler, ORGANIZATION_NAME, SOURCE_ID, list_page_url, parse_detail, parse_notices,
+    };
     use crate::crawler::Crawler;
     use chrono::NaiveDate;
 
@@ -357,18 +396,41 @@ mod tests {
     }
 
     #[test]
-    fn returns_error_when_no_notice_rows_are_found() {
-        let error = parse_notices("<div id=\"bo_list\"><p>게시물이 없습니다.</p></div>")
-            .expect_err("missing rows should return an error");
+    fn empty_board_page_returns_no_notices() {
+        let notices = parse_notices("<div id=\"bo_list\"><p>게시물이 없습니다.</p></div>")
+            .expect("an empty final page should parse");
+
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn malformed_list_page_returns_an_error() {
+        let error = parse_notices("<html><body>Unexpected page</body></html>")
+            .expect_err("missing board markup should return an error");
 
         assert_eq!(error.source_id(), SOURCE_ID);
-        assert!(error.message().contains("no notice rows found"));
+        assert!(error.message().contains("missing #bo_list"));
     }
 
     #[test]
     fn crawler_exposes_expected_source_id() {
-        let crawler = ComputerCrawler::with_client(reqwest::Client::new());
+        let crawler = ComputerCrawler::with_client(reqwest::Client::new(), 10);
         assert_eq!(crawler.source_id(), "computer");
+    }
+
+    #[test]
+    fn builds_list_url_for_requested_page() {
+        assert_eq!(
+            list_page_url(2).as_str(),
+            "https://computer.knu.ac.kr/bbs/board.php?bo_table=sub6_1_a&page=2"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_limit_returns_without_fetching() {
+        let crawler = ComputerCrawler::with_client(reqwest::Client::new(), 0);
+
+        assert!(crawler.crawl().await.unwrap().is_empty());
     }
 
     #[test]
