@@ -1,4 +1,5 @@
 use cheomseongd::daemon::{run_daemon, supports_crawler};
+use cheomseongd::db::run_migrations;
 use cheomseongd::models::crawler_config::NewCrawlerConfig;
 use cheomseongd::ops::crawler_config::{set_crawler_config, unset_crawler_config};
 use clap::{Parser, Subcommand};
@@ -29,6 +30,8 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    run_migrations()?;
+
     match Cli::parse().command {
         Commands::Set {
             crawler,

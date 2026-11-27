@@ -26,5 +26,15 @@ services:
       retries: 15
       start_period: 10s
 
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/cheomseongd
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["start"]
+
 volumes:
   postgres_data:
