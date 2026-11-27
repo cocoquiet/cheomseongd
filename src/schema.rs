@@ -16,6 +16,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    crawler_configs (crawler_id) {
+        #[max_length = 100]
+        crawler_id -> Varchar,
+        interval_seconds -> Int8,
+        notice_count -> Int4,
+    }
+}
+
+diesel::table! {
     images (id) {
         id -> Int8,
         notice_id -> Int8,
@@ -50,4 +59,4 @@ diesel::table! {
 diesel::joinable!(attachments -> notices (notice_id));
 diesel::joinable!(images -> notices (notice_id));
 
-diesel::allow_tables_to_appear_in_same_query!(attachments, images, notices,);
+diesel::allow_tables_to_appear_in_same_query!(attachments, crawler_configs, images, notices,);
