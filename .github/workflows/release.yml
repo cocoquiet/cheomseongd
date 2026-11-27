@@ -139,6 +139,12 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      - name: Install PostgreSQL client library on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install libpq
+          echo "PQ_LIB_DIR=$(brew --prefix libpq)/lib" >> "$GITHUB_ENV"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
