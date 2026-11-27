@@ -1,14 +1,13 @@
 use super::{CrawlError, CrawledNotice, Crawler};
+use crate::db::establish_connection;
 use crate::models::{
     attachment::NewAttachment,
     image::NewImage,
     notice::{NewNotice, Notice, UpdateNotice},
 };
-use crate::ops::{
-    attachment::{create_attachment, delete_attachments_by_notice_id},
-    image::{create_image, delete_images_by_notice_id},
-    notice::{create_notice, get_notice_by_source, update_notice},
-};
+use crate::schema::{attachments, images, notices};
+use diesel::prelude::*;
+use diesel::result::OptionalExtension;
 
 /// Runs one crawler and returns its normalized notices.
 ///
@@ -18,72 +17,83 @@ pub async fn crawl<C: Crawler + ?Sized>(crawler: &C) -> Result<Vec<CrawledNotice
     crawler.crawl().await
 }
 
-/// Crawls one source and inserts notices plus their attachments and images
-/// through the existing DB operations.
-///
-/// Database errors follow the current `create_*` operation behavior, which panics on failure.
+/// Crawls one source and transactionally inserts or updates notices and related media.
 pub async fn run<C: Crawler + ?Sized>(crawler: &C) -> Result<Vec<Notice>, CrawlError> {
     let crawled_notices = crawl(crawler).await?;
     let mut saved_notices = Vec::with_capacity(crawled_notices.len());
+    let connection = &mut establish_connection();
 
     for crawled_notice in &crawled_notices {
-        let notice = match get_notice_by_source(
-            &crawled_notice.organization_name,
-            &crawled_notice.source_key,
-        )
-        .expect("Error looking up notice by source")
-        {
-            Some(existing) => update_notice(
-                existing.id,
-                UpdateNotice {
-                    organization_name: Some(&crawled_notice.organization_name),
-                    source_key: Some(&crawled_notice.source_key),
-                    source_url: Some(&crawled_notice.source_url),
-                    title: Some(&crawled_notice.title),
-                    author: crawled_notice.author.as_deref(),
-                    category: crawled_notice.category.as_deref(),
-                    body_text: crawled_notice.body_text.as_deref(),
-                    is_pinned: Some(crawled_notice.is_pinned),
-                    published_on: crawled_notice.published_on,
-                },
-            )
-            .expect("Error updating notice"),
-            None => create_notice(NewNotice {
-                organization_name: &crawled_notice.organization_name,
-                source_key: &crawled_notice.source_key,
-                source_url: &crawled_notice.source_url,
-                title: &crawled_notice.title,
-                author: crawled_notice.author.as_deref(),
-                category: crawled_notice.category.as_deref(),
-                body_text: crawled_notice.body_text.as_deref(),
-                is_pinned: crawled_notice.is_pinned,
-                published_on: crawled_notice.published_on,
-            }),
-        };
+        let notice = connection
+            .transaction::<Notice, diesel::result::Error, _>(|connection| {
+                let existing = notices::table
+                    .filter(notices::organization_name.eq(&crawled_notice.organization_name))
+                    .filter(notices::source_key.eq(&crawled_notice.source_key))
+                    .select(Notice::as_select())
+                    .first::<Notice>(connection)
+                    .optional()?;
 
-        delete_attachments_by_notice_id(notice.id).expect("Error replacing notice attachments");
-        delete_images_by_notice_id(notice.id).expect("Error replacing notice images");
+                let notice = match existing {
+                    Some(existing) => diesel::update(notices::table.find(existing.id))
+                        .set(UpdateNotice {
+                            organization_name: Some(&crawled_notice.organization_name),
+                            source_key: Some(&crawled_notice.source_key),
+                            source_url: Some(&crawled_notice.source_url),
+                            title: Some(&crawled_notice.title),
+                            author: crawled_notice.author.as_deref(),
+                            category: crawled_notice.category.as_deref(),
+                            body_text: crawled_notice.body_text.as_deref(),
+                            is_pinned: Some(crawled_notice.is_pinned),
+                            published_on: crawled_notice.published_on,
+                        })
+                        .get_result::<Notice>(connection)?,
+                    None => diesel::insert_into(notices::table)
+                        .values(NewNotice {
+                            organization_name: &crawled_notice.organization_name,
+                            source_key: &crawled_notice.source_key,
+                            source_url: &crawled_notice.source_url,
+                            title: &crawled_notice.title,
+                            author: crawled_notice.author.as_deref(),
+                            category: crawled_notice.category.as_deref(),
+                            body_text: crawled_notice.body_text.as_deref(),
+                            is_pinned: crawled_notice.is_pinned,
+                            published_on: crawled_notice.published_on,
+                        })
+                        .get_result::<Notice>(connection)?,
+                };
 
-        for attachment in &crawled_notice.attachments {
-            create_attachment(NewAttachment {
-                notice_id: notice.id,
-                source_key: &attachment.source_key,
-                file_name: &attachment.file_name,
-                download_url: &attachment.download_url,
-                display_order: attachment.display_order,
-                content_type: attachment.content_type.as_deref(),
-            });
-        }
+                diesel::delete(attachments::table.filter(attachments::notice_id.eq(notice.id)))
+                    .execute(connection)?;
+                diesel::delete(images::table.filter(images::notice_id.eq(notice.id)))
+                    .execute(connection)?;
 
-        for image in &crawled_notice.images {
-            create_image(NewImage {
-                notice_id: notice.id,
-                source_url: &image.source_url,
-                alt_text: image.alt_text.as_deref(),
-                display_order: image.display_order,
-            });
-        }
+                for attachment in &crawled_notice.attachments {
+                    diesel::insert_into(attachments::table)
+                        .values(NewAttachment {
+                            notice_id: notice.id,
+                            source_key: &attachment.source_key,
+                            file_name: &attachment.file_name,
+                            download_url: &attachment.download_url,
+                            display_order: attachment.display_order,
+                            content_type: attachment.content_type.as_deref(),
+                        })
+                        .execute(connection)?;
+                }
 
+                for image in &crawled_notice.images {
+                    diesel::insert_into(images::table)
+                        .values(NewImage {
+                            notice_id: notice.id,
+                            source_url: &image.source_url,
+                            alt_text: image.alt_text.as_deref(),
+                            display_order: image.display_order,
+                        })
+                        .execute(connection)?;
+                }
+
+                Ok(notice)
+            })
+            .map_err(|error| CrawlError::new(crawler.source_id(), error.to_string()))?;
         saved_notices.push(notice);
     }
 
