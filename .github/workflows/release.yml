@@ -138,8 +138,14 @@ jobs:
         run: |
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
           & "$env:VCPKG_ROOT\vcpkg.exe" install libpq:x64-windows
+          $libpqLibDir = Join-Path $env:VCPKG_ROOT "installed\x64-windows\lib"
+          $libpqLib = Join-Path $libpqLibDir "libpq.lib"
+          if (-not (Test-Path $libpqLib)) {
+            throw "vcpkg installed libpq, but $libpqLib was not found"
+          }
           "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
           "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
+          "PQ_LIB_DIR=$libpqLibDir" >> $env:GITHUB_ENV
         shell: "pwsh"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
