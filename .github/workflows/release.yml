@@ -127,6 +127,20 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Install PostgreSQL client library on macOS"
+        if: "runner.os == 'macOS'"
+        run: |
+          brew install libpq
+          echo "PQ_LIB_DIR=$(brew --prefix libpq)/lib" >> "$GITHUB_ENV"
+        shell: "bash"
+      - name: "Install PostgreSQL client library on Windows"
+        if: "runner.os == 'Windows'"
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          & "$env:VCPKG_ROOT\vcpkg.exe" install libpq:x64-windows
+          "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
+          "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
+        shell: "pwsh"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
@@ -139,20 +153,6 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
-      - name: Install PostgreSQL client library on macOS
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          brew install libpq
-          echo "PQ_LIB_DIR=$(brew --prefix libpq)/lib" >> "$GITHUB_ENV"
-      - name: Install PostgreSQL client library on Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
-          & "$env:VCPKG_ROOT\vcpkg.exe" install libpq:x64-windows
-          "VCPKG_ROOT=$env:VCPKG_ROOT" >> $env:GITHUB_ENV
-          "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
