@@ -19,6 +19,19 @@ pub fn get_notice_by_id(notice_id: i64) -> QueryResult<Notice> {
         .first::<Notice>(connection)
 }
 
+pub fn get_notice_by_source(
+    organization_name: &str,
+    source_key: &str,
+) -> QueryResult<Option<Notice>> {
+    let connection = &mut establish_connection();
+    notices::table
+        .filter(notices::organization_name.eq(organization_name))
+        .filter(notices::source_key.eq(source_key))
+        .select(Notice::as_select())
+        .first::<Notice>(connection)
+        .optional()
+}
+
 pub fn get_notices() -> QueryResult<Vec<Notice>> {
     let connection = &mut establish_connection();
     notices::table
