@@ -27,6 +27,11 @@ pub fn get_images_by_notice_id(notice_id: i64) -> QueryResult<Vec<Image>> {
         .load::<Image>(connection)
 }
 
+pub fn delete_images_by_notice_id(notice_id: i64) -> QueryResult<usize> {
+    let connection = &mut establish_connection();
+    diesel::delete(images::table.filter(images::notice_id.eq(notice_id))).execute(connection)
+}
+
 pub fn delete_image(image_id: i64) -> QueryResult<usize> {
     let connection = &mut establish_connection();
     diesel::delete(images::table.filter(images::id.eq(image_id))).execute(connection)

@@ -27,6 +27,12 @@ pub fn get_attachments_by_notice_id(notice_id: i64) -> QueryResult<Vec<Attachmen
         .load::<Attachment>(connection)
 }
 
+pub fn delete_attachments_by_notice_id(notice_id: i64) -> QueryResult<usize> {
+    let connection = &mut establish_connection();
+    diesel::delete(attachments::table.filter(attachments::notice_id.eq(notice_id)))
+        .execute(connection)
+}
+
 pub fn delete_attachment(attachment_id: i64) -> QueryResult<usize> {
     let connection = &mut establish_connection();
     diesel::delete(attachments::table.filter(attachments::id.eq(attachment_id))).execute(connection)

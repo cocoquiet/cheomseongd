@@ -1,10 +1,14 @@
 use super::{CrawlError, CrawledNotice, Crawler};
-use crate::models::attachment::NewAttachment;
-use crate::models::image::NewImage;
-use crate::models::notice::{NewNotice, Notice};
-use crate::ops::attachment::create_attachment;
-use crate::ops::image::create_image;
-use crate::ops::notice::create_notice;
+use crate::models::{
+    attachment::NewAttachment,
+    image::NewImage,
+    notice::{NewNotice, Notice, UpdateNotice},
+};
+use crate::ops::{
+    attachment::{create_attachment, delete_attachments_by_notice_id},
+    image::{create_image, delete_images_by_notice_id},
+    notice::{create_notice, get_notice_by_source, update_notice},
+};
 
 /// Runs one crawler and returns its normalized notices.
 ///
@@ -23,17 +27,42 @@ pub async fn run<C: Crawler + ?Sized>(crawler: &C) -> Result<Vec<Notice>, CrawlE
     let mut saved_notices = Vec::with_capacity(crawled_notices.len());
 
     for crawled_notice in &crawled_notices {
-        let notice = create_notice(NewNotice {
-            organization_name: &crawled_notice.organization_name,
-            source_key: &crawled_notice.source_key,
-            source_url: &crawled_notice.source_url,
-            title: &crawled_notice.title,
-            author: crawled_notice.author.as_deref(),
-            category: crawled_notice.category.as_deref(),
-            body_text: crawled_notice.body_text.as_deref(),
-            is_pinned: crawled_notice.is_pinned,
-            published_on: crawled_notice.published_on,
-        });
+        let notice = match get_notice_by_source(
+            &crawled_notice.organization_name,
+            &crawled_notice.source_key,
+        )
+        .expect("Error looking up notice by source")
+        {
+            Some(existing) => update_notice(
+                existing.id,
+                UpdateNotice {
+                    organization_name: Some(&crawled_notice.organization_name),
+                    source_key: Some(&crawled_notice.source_key),
+                    source_url: Some(&crawled_notice.source_url),
+                    title: Some(&crawled_notice.title),
+                    author: crawled_notice.author.as_deref(),
+                    category: crawled_notice.category.as_deref(),
+                    body_text: crawled_notice.body_text.as_deref(),
+                    is_pinned: Some(crawled_notice.is_pinned),
+                    published_on: crawled_notice.published_on,
+                },
+            )
+            .expect("Error updating notice"),
+            None => create_notice(NewNotice {
+                organization_name: &crawled_notice.organization_name,
+                source_key: &crawled_notice.source_key,
+                source_url: &crawled_notice.source_url,
+                title: &crawled_notice.title,
+                author: crawled_notice.author.as_deref(),
+                category: crawled_notice.category.as_deref(),
+                body_text: crawled_notice.body_text.as_deref(),
+                is_pinned: crawled_notice.is_pinned,
+                published_on: crawled_notice.published_on,
+            }),
+        };
+
+        delete_attachments_by_notice_id(notice.id).expect("Error replacing notice attachments");
+        delete_images_by_notice_id(notice.id).expect("Error replacing notice images");
 
         for attachment in &crawled_notice.attachments {
             create_attachment(NewAttachment {
